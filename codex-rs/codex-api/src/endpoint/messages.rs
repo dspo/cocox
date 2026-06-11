@@ -24,6 +24,15 @@ use serde_json::Value;
 use std::sync::Arc;
 use tracing::instrument;
 
+/// HTTP client for the Anthropic Messages API streaming endpoint.
+///
+/// Unlike `ResponsesClient`, this client POSTs to a caller-supplied URL
+/// (typically from `ModelProviderInfo::messages_endpoint_url()`) rather
+/// than assembling a path from a provider base URL. This allows users
+/// to target arbitrary Messages-API-compatible providers.
+///
+/// The client is generic over `HttpTransport` so it can be used with
+/// both real HTTP clients and test doubles.
 pub struct MessagesClient<T: HttpTransport> {
     session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
@@ -31,6 +40,9 @@ pub struct MessagesClient<T: HttpTransport> {
     endpoint_url: String,
 }
 
+/// Per-request options for the Messages API. Lighter than
+/// `ResponsesOptions` because Anthropic doesn't use session/thread
+/// IDs or request compression.
 pub struct MessagesOptions {
     pub extra_headers: HeaderMap,
 }

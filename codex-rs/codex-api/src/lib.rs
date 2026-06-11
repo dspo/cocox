@@ -44,6 +44,7 @@ pub use crate::common::WS_REQUEST_HEADER_TRACESTATE_CLIENT_METADATA_KEY;
 pub use crate::common::create_text_param_for_request;
 pub use crate::common::response_create_client_metadata;
 
+pub use crate::anthropic::ANTHROPIC_API_VERSION;
 pub use crate::anthropic::AnthropicContentBlockDelta;
 pub use crate::anthropic::AnthropicContentBlockParam;
 pub use crate::anthropic::AnthropicImageSource;

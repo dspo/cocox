@@ -7,6 +7,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Required `anthropic-version` header value for the Messages API.
+/// Covers text + tool use + streaming; bump when adopting newer features
+/// (e.g. extended thinking requires a later version).
+pub const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+
 
 /// Canonical input payload for the Anthropic Messages API (POST /v1/messages).
 ///
@@ -44,7 +49,6 @@ pub enum AnthropicSystemPrompt {
 #[derive(Debug, Clone, Serialize)]
 pub struct AnthropicMessageParam {
     pub role: String,
-    #[serde(flatten)]
     pub content: AnthropicMessageContent,
 }
 

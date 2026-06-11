@@ -59,10 +59,11 @@ pub fn response_items_to_anthropic_messages(
             }
             ResponseItem::FunctionCallOutput { call_id, output } => {
                 let result_content = function_output_to_tool_result_content(output);
+                let is_error = (output.success == Some(false)).then_some(true);
                 let tool_result = AnthropicContentBlockParam::ToolResult {
                     tool_use_id: call_id.clone(),
                     content: result_content,
-                    is_error: None,
+                    is_error,
                 };
                 let new_msg = AnthropicMessageParam {
                     role: "user".to_string(),
@@ -92,10 +93,11 @@ pub fn response_items_to_anthropic_messages(
                 call_id, output, ..
             } => {
                 let result_content = function_output_to_tool_result_content(output);
+                let is_error = (output.success == Some(false)).then_some(true);
                 let tool_result = AnthropicContentBlockParam::ToolResult {
                     tool_use_id: call_id.clone(),
                     content: result_content,
-                    is_error: None,
+                    is_error,
                 };
                 let new_msg = AnthropicMessageParam {
                     role: "user".to_string(),
@@ -191,12 +193,13 @@ fn push_or_merge(messages: &mut Vec<AnthropicMessageParam>, new_msg: AnthropicMe
     }
 }
 
-/// Tries to parse arguments JSON string into a Value; returns Null on failure.
+/// Tries to parse arguments JSON string into a Value; returns an empty
+/// object on failure so the Anthropic API always receives a valid JSON object.
 fn parse_arguments(arguments: &str) -> Value {
     if arguments.is_empty() {
         return Value::Object(serde_json::Map::new());
     }
-    serde_json::from_str(arguments).unwrap_or(Value::Null)
+    serde_json::from_str(arguments).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
 }
 
 #[cfg(test)]

@@ -37,7 +37,7 @@ impl AuthProvider for AnthropicApiKeyAuthProvider {
         }
         let _ = headers.insert(
             "anthropic-version",
-            HeaderValue::from_static("2023-06-01"),
+            HeaderValue::from_static(codex_api::ANTHROPIC_API_VERSION),
         );
     }
 }
@@ -139,6 +139,9 @@ fn anthropic_auth_for_provider(
     }
 
     if let Some(token) = provider.experimental_bearer_token.clone() {
+        // NOTE: experimental_bearer_token is repurposed here as an
+        // Anthropic API key. This is intentional so users can configure
+        // a static key without setting an env var.
         return Ok(Some(AnthropicApiKeyAuthProvider::new(token)));
     }
 

@@ -53,7 +53,6 @@ struct ToolCallState {
     index: i64,
     call_id: String,
     name: String,
-    arguments: String,
     /// Accumulated partial JSON fragments for the current tool call.
     partial_json: String,
 }
@@ -217,7 +216,6 @@ fn process_messages_event(
                         index,
                         call_id: id.clone(),
                         name: name.clone(),
-                        arguments: String::new(),
                         partial_json: String::new(),
                     });
 
