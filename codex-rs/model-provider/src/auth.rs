@@ -17,6 +17,31 @@ use crate::bearer_auth_provider::BearerAuthProvider;
 const BEDROCK_API_KEY_UNSUPPORTED_MESSAGE: &str =
     "Bedrock API key auth is only supported by the Amazon Bedrock model provider";
 
+/// Auth provider that sends `x-api-key` (Anthropic-style) instead of
+/// `Authorization: Bearer`.
+#[derive(Clone, Debug)]
+pub struct AnthropicApiKeyAuthProvider {
+    api_key: String,
+}
+
+impl AnthropicApiKeyAuthProvider {
+    pub fn new(api_key: String) -> Self {
+        Self { api_key }
+    }
+}
+
+impl AuthProvider for AnthropicApiKeyAuthProvider {
+    fn add_auth_headers(&self, headers: &mut HeaderMap) {
+        if let Ok(header) = HeaderValue::from_str(&self.api_key) {
+            let _ = headers.insert("x-api-key", header);
+        }
+        let _ = headers.insert(
+            "anthropic-version",
+            HeaderValue::from_static("2023-06-01"),
+        );
+    }
+}
+
 #[derive(Clone, Debug)]
 struct AgentIdentityAuthProvider {
     auth: codex_login::auth::AgentIdentityAuth,
@@ -89,6 +114,13 @@ pub(crate) fn resolve_provider_auth(
         ));
     }
 
+    // For Anthropic Messages providers, use x-api-key instead of Bearer.
+    if provider.wire_api == codex_model_provider_info::WireApi::AnthropicMessages {
+        if let Some(api_key_provider) = anthropic_auth_for_provider(provider)? {
+            return Ok(Arc::new(api_key_provider));
+        }
+    }
+
     if let Some(auth) = bearer_auth_for_provider(provider)? {
         return Ok(Arc::new(auth));
     }
@@ -97,6 +129,20 @@ pub(crate) fn resolve_provider_auth(
         Some(auth) => auth_provider_from_auth(auth),
         None => unauthenticated_auth_provider(),
     })
+}
+
+fn anthropic_auth_for_provider(
+    provider: &ModelProviderInfo,
+) -> codex_protocol::error::Result<Option<AnthropicApiKeyAuthProvider>> {
+    if let Some(api_key) = provider.api_key()? {
+        return Ok(Some(AnthropicApiKeyAuthProvider::new(api_key)));
+    }
+
+    if let Some(token) = provider.experimental_bearer_token.clone() {
+        return Ok(Some(AnthropicApiKeyAuthProvider::new(token)));
+    }
+
+    Ok(None)
 }
 
 fn bearer_auth_for_provider(

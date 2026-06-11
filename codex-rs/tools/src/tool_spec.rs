@@ -88,6 +88,61 @@ pub fn create_tools_json_for_responses_api(
     Ok(tools_json)
 }
 
+/// Returns JSON values in the Anthropic Messages API tool format.
+///
+/// Each tool is serialized as:
+/// `{ "name": "...", "description?": "...", "input_schema": {...} }`
+///
+/// Only `Function` and `Freeform` tools are supported; other tool types
+/// are silently skipped since the Anthropic API has no equivalent.
+pub fn create_tools_json_for_messages_api(
+    tools: &[ToolSpec],
+) -> Vec<Value> {
+    tools
+        .iter()
+        .filter_map(|tool| match tool {
+            ToolSpec::Function(tool) => {
+                let schema = serde_json::to_value(&tool.parameters).ok()?;
+                Some(anthropic_tool_value(
+                    &tool.name,
+                    &tool.description,
+                    &schema,
+                ))
+            }
+            ToolSpec::Freeform(tool) => Some(anthropic_tool_value(
+                &tool.name,
+                &tool.description,
+                // Freeform tools use a format definition instead of a JSON schema.
+                // Emit a basic object schema so the tool is still usable.
+                &serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                }),
+            )),
+            // Namespace, ToolSearch, WebSearch, ImageGeneration have no
+            // Anthropic equivalent — skip them.
+            _ => None,
+        })
+        .collect()
+}
+
+fn anthropic_tool_value(
+    name: &str,
+    description: &str,
+    parameters: &Value,
+) -> Value {
+    let mut tool = serde_json::Map::new();
+    tool.insert("name".to_string(), Value::String(name.to_string()));
+    if !description.is_empty() {
+        tool.insert(
+            "description".to_string(),
+            Value::String(description.to_string()),
+        );
+    }
+    tool.insert("input_schema".to_string(), parameters.clone());
+    Value::Object(tool)
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ResponsesApiWebSearchFilters {
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -346,6 +346,7 @@ mod tests {
             auth: None,
             aws: None,
             wire_api: WireApi::Responses,
+            endpoint: None,
             query_params: None,
             http_headers: None,
             env_http_headers: None,
@@ -529,6 +530,7 @@ mod tests {
                 name: "Custom".to_string(),
                 base_url: Some("http://localhost:1234/v1".to_string()),
                 wire_api: WireApi::Responses,
+            endpoint: None,
                 requires_openai_auth: false,
                 ..Default::default()
             },

@@ -85,6 +85,7 @@ use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_tools::create_tools_json_for_responses_api;
+use codex_tools::create_tools_json_for_messages_api;
 use eventsource_stream::Event;
 use eventsource_stream::EventStreamError;
 use futures::StreamExt;
@@ -107,12 +108,18 @@ use tracing::warn;
 use crate::attestation::AttestationContext;
 use crate::attestation::AttestationProvider;
 use crate::attestation::X_OAI_ATTESTATION_HEADER;
+use crate::anthropic_mapping::response_items_to_anthropic_messages;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::feedback_tags;
 use crate::util::emit_feedback_auth_recovery_tags;
 use codex_api::map_api_error;
+use codex_api::AnthropicMessagesRequest;
+use codex_api::AnthropicSystemPrompt;
+use codex_api::AnthropicToolChoice;
+use codex_api::MessagesClient;
+use codex_api::MessagesOptions;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
 use codex_login::auth_env_telemetry::AuthEnvTelemetry;
@@ -797,6 +804,43 @@ impl ModelClient {
         Ok(request)
     }
 
+    /// Builds an Anthropic Messages API request from the given prompt and model configuration.
+    fn build_messages_request(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        _window_id: &str,
+    ) -> Result<AnthropicMessagesRequest> {
+        let messages = response_items_to_anthropic_messages(&prompt.input);
+        let system = (!prompt.base_instructions.text.is_empty())
+            .then(|| AnthropicSystemPrompt::Text(prompt.base_instructions.text.clone()));
+        let tools = create_tools_json_for_messages_api(&prompt.tools);
+
+        // Estimate max_tokens from the model's context window.
+        // For Messages API this is required and should be large enough
+        // for a typical response.
+        let max_tokens = model_info
+            .context_window
+            .unwrap_or(8192)
+            .max(1)
+            .min(32768);
+
+        Ok(AnthropicMessagesRequest {
+            model: model_info.slug.clone(),
+            messages,
+            system,
+            max_tokens,
+            stream: true,
+            temperature: None,
+            tools,
+            tool_choice: Some(AnthropicToolChoice::Auto {
+                disable_parallel_tool_use: Some(!prompt.parallel_tool_calls),
+            }),
+            thinking: None,
+            metadata: None,
+        })
+    }
+
     /// Returns whether the Responses-over-WebSocket transport is active for this session.
     ///
     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
@@ -1344,6 +1388,90 @@ impl ModelClientSession {
         }
     }
 
+    /// Streams a turn via the Anthropic Messages API over HTTP.
+    #[instrument(
+        name = "model_client.stream_messages_api",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "messages_http",
+            http.method = "POST",
+            api.path = "messages",
+            turn.has_metadata_header = turn_metadata_header.is_some()
+        )
+    )]
+    async fn stream_messages_api(
+        &self,
+        window_id: &str,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        turn_metadata_header: Option<&str>,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let client_setup = self.client.current_client_setup().await?;
+        let transport = ReqwestTransport::new(build_reqwest_client());
+
+        let endpoint_url = self
+            .client
+            .state
+            .provider
+            .info()
+            .messages_endpoint_url();
+
+        let request =
+            self.client
+                .build_messages_request(prompt, model_info, window_id)?;
+
+        let inference_trace_attempt = inference_trace.start_attempt();
+        inference_trace_attempt.record_started(&format!(
+            "Anthropic Messages: model={} endpoint={endpoint_url}",
+            model_info.slug,
+        ));
+
+        let client = MessagesClient::new(
+            transport,
+            client_setup.api_provider,
+            client_setup.api_auth,
+            endpoint_url,
+        );
+
+        let mut extra_headers = ApiHeaderMap::new();
+        if let Some(ref thread_id) = turn_metadata_header
+            && let Ok(value) = HeaderValue::from_str(thread_id)
+        {
+            extra_headers.insert("x-client-request-id", value);
+        }
+
+        let options = MessagesOptions { extra_headers };
+
+        let stream_result = client.stream_request(request, options).await;
+
+        match stream_result {
+            Ok(stream) => {
+                let (stream, _) = map_response_stream(
+                    stream,
+                    session_telemetry.clone(),
+                    inference_trace_attempt,
+                );
+                Ok(stream)
+            }
+            Err(err) => {
+                let response_debug_context =
+                    extract_response_debug_context_from_api_error(&err);
+                let err = map_api_error(err);
+                inference_trace_attempt.record_failed(
+                    &err,
+                    response_debug_context.request_id.as_deref(),
+                    /*output_items*/ &[],
+                );
+                Err(err)
+            }
+        }
+    }
+
     /// Streams a turn via the Responses API over WebSocket transport.
     #[allow(clippy::too_many_arguments)]
     #[instrument(
@@ -1653,6 +1781,17 @@ impl ModelClientSession {
                     effort,
                     summary,
                     service_tier,
+                    turn_metadata_header,
+                    inference_trace,
+                )
+                .await
+            }
+            WireApi::AnthropicMessages => {
+                self.stream_messages_api(
+                    window_id,
+                    prompt,
+                    model_info,
+                    session_telemetry,
                     turn_metadata_header,
                     inference_trace,
                 )

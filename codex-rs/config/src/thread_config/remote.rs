@@ -153,6 +153,7 @@ fn model_provider_from_proto(
     let id = provider.id;
     let wire_api = match proto::WireApi::try_from(provider.wire_api) {
         Ok(proto::WireApi::Responses) => WireApi::Responses,
+        Ok(proto::WireApi::AnthropicMessages) => WireApi::AnthropicMessages,
         Ok(proto::WireApi::Unspecified) => {
             return Err(parse_error("remote thread config omitted wire_api"));
         }
@@ -175,6 +176,7 @@ fn model_provider_from_proto(
             .transpose()?,
         aws: None,
         wire_api,
+        endpoint: provider.endpoint,
         query_params: provider.query_params.map(|map| map.values),
         http_headers: provider.http_headers.map(|map| map.values),
         env_http_headers: provider.env_http_headers.map(|map| map.values),
@@ -202,6 +204,7 @@ fn model_provider_to_proto(
         auth,
         aws: _,
         wire_api,
+        endpoint,
         query_params,
         http_headers,
         env_http_headers,
@@ -222,6 +225,7 @@ fn model_provider_to_proto(
         experimental_bearer_token,
         auth: auth.map(model_provider_auth_to_proto),
         wire_api: proto_wire_api(wire_api).into(),
+        endpoint,
         query_params: query_params.map(proto_string_map),
         http_headers: http_headers.map(proto_string_map),
         env_http_headers: env_http_headers.map(proto_string_map),
@@ -283,6 +287,7 @@ fn proto_string_map(values: HashMap<String, String>) -> proto::StringMap {
 fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
     match wire_api {
         WireApi::Responses => proto::WireApi::Responses,
+        WireApi::AnthropicMessages => proto::WireApi::AnthropicMessages,
     }
 }
 
@@ -448,6 +453,7 @@ mod tests {
                             websocket_connect_timeout_ms: Some(10_000),
                             requires_openai_auth: false,
                             supports_websockets: true,
+                            endpoint: None,
                         }],
                         features: HashMap::from([
                             ("plugins".to_string(), false),
@@ -493,6 +499,7 @@ mod tests {
                 cwd: workspace_dir(),
             }),
             wire_api: WireApi::Responses,
+            endpoint: None,
             query_params: Some(HashMap::from([(
                 "api-version".to_string(),
                 "2026-04-16".to_string(),

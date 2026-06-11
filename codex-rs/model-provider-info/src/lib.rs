@@ -54,12 +54,18 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// The Anthropic Messages API (POST /v1/messages).
+    /// Serializes as `"anthropic_messages"`; also accepts `"anthropic"` and
+    /// `"messages"` as convenience aliases during deserialization.
+    #[serde(rename = "anthropic_messages")]
+    AnthropicMessages,
 }
 
 impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Responses => "responses",
+            Self::AnthropicMessages => "anthropic_messages",
         };
         f.write_str(value)
     }
@@ -73,8 +79,12 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
+            "anthropic_messages" | "anthropic" | "messages" => Ok(Self::AnthropicMessages),
             "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses"])),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "anthropic_messages"],
+            )),
         }
     }
 }
@@ -105,6 +115,15 @@ pub struct ModelProviderInfo {
     /// Which wire protocol this provider expects.
     #[serde(default)]
     pub wire_api: WireApi,
+    /// Optional full endpoint URL. When set, this **completely overrides**
+    /// `base_url` for request URL construction (the value is used as-is as
+    /// the POST target). When `None` and `wire_api` is `AnthropicMessages`,
+    /// the runtime appends `"/v1/messages"` to `base_url`.
+    ///
+    /// This is mainly intended for `wire_api = "anthropic_messages"` but
+    /// providers using other wire protocols may also set it to bypass the
+    /// normal path-append behavior.
+    pub endpoint: Option<String>,
     /// Optional query parameters to append to the base URL.
     pub query_params: Option<HashMap<String, String>>,
     /// Additional HTTP headers to include in requests to this provider where
@@ -331,6 +350,7 @@ impl ModelProviderInfo {
             auth: None,
             aws: None,
             wire_api: WireApi::Responses,
+            endpoint: None,
             query_params: None,
             http_headers: Some(
                 [("version".to_string(), env!("CARGO_PKG_VERSION").to_string())]
@@ -373,6 +393,7 @@ impl ModelProviderInfo {
                 region: None,
             })),
             wire_api: WireApi::Responses,
+            endpoint: None,
             query_params: None,
             http_headers: Some(HashMap::from([(
                 AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER.to_string(),
@@ -402,6 +423,24 @@ impl ModelProviderInfo {
 
     pub fn has_command_auth(&self) -> bool {
         self.auth.is_some()
+    }
+
+    /// Returns the full request URL for an Anthropic Messages API provider.
+    ///
+    /// When `endpoint` is set it is used as-is (overriding `base_url`).
+    /// Otherwise the runtime appends `"/v1/messages"` to `base_url`, falling
+    /// back to `"https://api.anthropic.com"` when even `base_url` is absent.
+    pub fn messages_endpoint_url(&self) -> String {
+        match &self.endpoint {
+            Some(url) => url.clone(),
+            None => {
+                let base = self
+                    .base_url
+                    .as_deref()
+                    .unwrap_or("https://api.anthropic.com");
+                format!("{}/v1/messages", base.trim_end_matches('/'))
+            }
+        }
     }
 }
 
@@ -507,6 +546,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         auth: None,
         aws: None,
         wire_api,
+        endpoint: None,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
