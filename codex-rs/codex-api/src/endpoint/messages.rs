@@ -7,7 +7,7 @@
 //! locations (e.g. DashScope, Ollama, LM Studio).
 
 use crate::auth::SharedAuthProvider;
-use crate::common::AnthropicMessagesRequest;
+use crate::anthropic::AnthropicMessagesRequest;
 use crate::common::ResponseStream;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;

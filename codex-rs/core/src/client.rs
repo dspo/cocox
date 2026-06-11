@@ -108,7 +108,6 @@ use tracing::warn;
 use crate::attestation::AttestationContext;
 use crate::attestation::AttestationProvider;
 use crate::attestation::X_OAI_ATTESTATION_HEADER;
-use crate::anthropic_mapping::response_items_to_anthropic_messages;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
@@ -120,6 +119,7 @@ use codex_api::AnthropicSystemPrompt;
 use codex_api::AnthropicToolChoice;
 use codex_api::MessagesClient;
 use codex_api::MessagesOptions;
+use codex_api::response_items_to_anthropic_messages;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
 use codex_login::auth_env_telemetry::AuthEnvTelemetry;
@@ -819,11 +819,15 @@ impl ModelClient {
         // Estimate max_tokens from the model's context window.
         // For Messages API this is required and should be large enough
         // for a typical response.
+        // Default max output tokens for Anthropic Messages API.
+        // Safe for claude-sonnet-4 (8192) and most Anthropic models.
+        // TODO: make this configurable per-model via ModelProviderInfo.
+        const DEFAULT_ANTHROPIC_MAX_TOKENS: i64 = 8192;
+
         let max_tokens = model_info
             .context_window
-            .unwrap_or(8192)
-            .max(1)
-            .min(32768);
+            .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS)
+            .min(DEFAULT_ANTHROPIC_MAX_TOKENS);
 
         Ok(AnthropicMessagesRequest {
             model: model_info.slug.clone(),

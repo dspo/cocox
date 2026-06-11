@@ -7,7 +7,6 @@
 
 mod apply_patch;
 mod apps;
-mod anthropic_mapping;
 mod client;
 mod client_common;
 mod realtime_context;

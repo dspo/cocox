@@ -5,11 +5,11 @@
 //! `Vec<ResponseItem>`) into the `messages` array expected by
 //! `AnthropicMessagesRequest`.
 
-use codex_api::AnthropicContentBlockParam;
-use codex_api::AnthropicImageSource;
-use codex_api::AnthropicMessageContent;
-use codex_api::AnthropicMessageParam;
-use codex_api::AnthropicToolResultContent;
+use crate::anthropic::AnthropicContentBlockParam;
+use crate::anthropic::AnthropicImageSource;
+use crate::anthropic::AnthropicMessageContent;
+use crate::anthropic::AnthropicMessageParam;
+use crate::anthropic::AnthropicToolResultContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseItem;

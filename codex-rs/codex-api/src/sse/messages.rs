@@ -4,10 +4,10 @@
 //! `ResponseEvent` stream, maintaining a state machine that tracks
 //! content block boundaries and tool-call aggregation.
 
-use crate::common::AnthropicContentBlockDelta;
-use crate::common::AnthropicResponseContentBlock;
-use crate::common::AnthropicStreamEvent;
-use crate::common::AnthropicUsage;
+use crate::anthropic::AnthropicContentBlockDelta;
+use crate::anthropic::AnthropicResponseContentBlock;
+use crate::anthropic::AnthropicStreamEvent;
+use crate::anthropic::AnthropicUsage;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::error::ApiError;
