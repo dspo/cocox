@@ -1,6 +1,7 @@
 pub(crate) mod api_bridge;
 pub(crate) mod auth;
 pub(crate) mod chat_completions;
+pub(crate) mod chat_completions_mapping;
 pub(crate) mod common;
 pub(crate) mod endpoint;
 pub(crate) mod error;
@@ -21,6 +22,8 @@ pub use codex_client::TransportError;
 
 pub use crate::api_bridge::map_api_error;
 pub use crate::auth::AgentIdentityTelemetry;
+pub use crate::chat_completions::ChatCompletionsRequest;
+pub use crate::chat_completions_mapping::map_to_chat_completions_request;
 pub use crate::auth::AuthError;
 pub use crate::auth::AuthHeaderTelemetry;
 pub use crate::auth::AuthProvider;
@@ -47,8 +50,7 @@ pub use crate::common::create_text_param_for_request;
 pub use crate::common::response_create_client_metadata;
 pub use crate::endpoint::CompactClient;
 pub use crate::endpoint::ChatCompletionsClient;
-pub use crate::endpoint::ChatCompletionsOptions;
-pub use crate::endpoint::ImagesClient;
+pub use crate::endpoint::ChatCompletionsOptions;pub use crate::endpoint::ImagesClient;
 pub use crate::endpoint::MemoriesClient;
 pub use crate::endpoint::ModelsClient;
 pub use crate::endpoint::RealtimeCallClient;

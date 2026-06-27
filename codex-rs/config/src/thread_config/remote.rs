@@ -159,6 +159,7 @@ fn model_provider_from_proto(
     let id = provider.id;
     let wire_api = match proto::WireApi::try_from(provider.wire_api) {
         Ok(proto::WireApi::Responses) => WireApi::Responses,
+        Ok(proto::WireApi::ChatCompletions) => WireApi::ChatCompletions,
         Ok(proto::WireApi::Unspecified) => {
             return Err(parse_error("remote thread config omitted wire_api"));
         }
@@ -289,6 +290,7 @@ fn proto_string_map(values: HashMap<String, String>) -> proto::StringMap {
 fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
     match wire_api {
         WireApi::Responses => proto::WireApi::Responses,
+        WireApi::ChatCompletions => proto::WireApi::ChatCompletions,
     }
 }
 
@@ -425,6 +427,20 @@ mod tests {
 
         assert_eq!(id, "local");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn model_provider_chat_completions_wire_api_roundtrips() {
+        let mut expected = expected_provider();
+        expected.wire_api = WireApi::ChatCompletions;
+        // Sanity-check the proto mapping before round-tripping.
+        assert_eq!(proto_wire_api(WireApi::ChatCompletions), proto::WireApi::ChatCompletions);
+
+        let proto = model_provider_to_proto("chat-completions", expected.clone());
+        let (id, actual) = model_provider_from_proto(proto).expect("model provider from proto");
+
+        assert_eq!(id, "chat-completions");
+        assert_eq!(actual.wire_api, WireApi::ChatCompletions);
     }
 
     fn proto_sources() -> Vec<proto::ThreadConfigSource> {
