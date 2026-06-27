@@ -160,6 +160,7 @@ fn model_provider_from_proto(
     let wire_api = match proto::WireApi::try_from(provider.wire_api) {
         Ok(proto::WireApi::Responses) => WireApi::Responses,
         Ok(proto::WireApi::ChatCompletions) => WireApi::ChatCompletions,
+        Ok(proto::WireApi::AnthropicMessages) => WireApi::AnthropicMessages,
         Ok(proto::WireApi::Unspecified) => {
             return Err(parse_error("remote thread config omitted wire_api"));
         }
@@ -291,6 +292,7 @@ fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
     match wire_api {
         WireApi::Responses => proto::WireApi::Responses,
         WireApi::ChatCompletions => proto::WireApi::ChatCompletions,
+        WireApi::AnthropicMessages => proto::WireApi::AnthropicMessages,
     }
 }
 
@@ -441,6 +443,22 @@ mod tests {
 
         assert_eq!(id, "chat-completions");
         assert_eq!(actual.wire_api, WireApi::ChatCompletions);
+    }
+
+    #[test]
+    fn model_provider_anthropic_messages_wire_api_roundtrips() {
+        let mut expected = expected_provider();
+        expected.wire_api = WireApi::AnthropicMessages;
+        assert_eq!(
+            proto_wire_api(WireApi::AnthropicMessages),
+            proto::WireApi::AnthropicMessages
+        );
+
+        let proto = model_provider_to_proto("anthropic", expected.clone());
+        let (id, actual) = model_provider_from_proto(proto).expect("model provider from proto");
+
+        assert_eq!(id, "anthropic");
+        assert_eq!(actual.wire_api, WireApi::AnthropicMessages);
     }
 
     fn proto_sources() -> Vec<proto::ThreadConfigSource> {

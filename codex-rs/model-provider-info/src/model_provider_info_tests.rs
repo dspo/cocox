@@ -134,6 +134,36 @@ wire_api = "chat_completions"
 }
 
 #[test]
+fn test_deserialize_anthropic_messages_wire_api() {
+    for value in ["anthropic_messages", "anthropic", "messages"] {
+        let provider_toml = format!(
+            r#"
+name = "Anthropic"
+base_url = "https://api.anthropic.com"
+env_key = "ANTHROPIC_API_KEY"
+wire_api = "{value}"
+        "#
+        );
+        let provider: ModelProviderInfo = toml::from_str(&provider_toml)
+            .unwrap_or_else(|_| panic!("failed to deserialize wire_api = {value}"));
+        assert_eq!(provider.wire_api, WireApi::AnthropicMessages, "for {value}");
+    }
+    let provider: ModelProviderInfo = toml::from_str(
+        r#"
+name = "x"
+base_url = "https://api.anthropic.com"
+wire_api = "anthropic_messages"
+        "#,
+    )
+    .unwrap();
+    assert_eq!(format!("{}", provider.wire_api), "anthropic_messages");
+    assert_eq!(
+        provider.messages_endpoint_url(),
+        "https://api.anthropic.com/v1/messages"
+    );
+}
+
+#[test]
 fn test_deserialize_websocket_connect_timeout() {
     let provider_toml = r#"
 name = "OpenAI"

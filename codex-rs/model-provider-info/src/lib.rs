@@ -59,6 +59,11 @@ pub enum WireApi {
     /// `/v1/chat/completions`. Used for providers that do not implement the
     /// Responses API (e.g. many OSS and third-party OpenAI-compatible servers).
     ChatCompletions,
+    /// The Anthropic Messages API (`POST /v1/messages`). Serializes as
+    /// `"anthropic_messages"`; accepts `"anthropic"` and `"messages"` as
+    /// convenience aliases when deserializing.
+    #[serde(rename = "anthropic_messages")]
+    AnthropicMessages,
 }
 
 impl fmt::Display for WireApi {
@@ -66,6 +71,7 @@ impl fmt::Display for WireApi {
         let value = match self {
             Self::Responses => "responses",
             Self::ChatCompletions => "chat_completions",
+            Self::AnthropicMessages => "anthropic_messages",
         };
         f.write_str(value)
     }
@@ -80,10 +86,11 @@ impl<'de> Deserialize<'de> for WireApi {
         match value.as_str() {
             "responses" => Ok(Self::Responses),
             "chat_completions" => Ok(Self::ChatCompletions),
+            "anthropic_messages" | "anthropic" | "messages" => Ok(Self::AnthropicMessages),
             "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
-                &["responses", "chat_completions"],
+                &["responses", "chat_completions", "anthropic_messages"],
             )),
         }
     }
@@ -422,6 +429,19 @@ impl ModelProviderInfo {
 
     pub fn has_command_auth(&self) -> bool {
         self.auth.is_some()
+    }
+
+    /// Returns the full request URL for an Anthropic Messages API provider.
+    ///
+    /// Appends `/v1/messages` to `base_url`, falling back to
+    /// `https://api.anthropic.com` when `base_url` is absent. This is only
+    /// meaningful for `wire_api = "anthropic_messages"`.
+    pub fn messages_endpoint_url(&self) -> String {
+        let base = self
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.anthropic.com");
+        format!("{}/v1/messages", base.trim_end_matches('/'))
     }
 }
 
