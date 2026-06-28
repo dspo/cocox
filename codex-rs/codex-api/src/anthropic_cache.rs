@@ -1,31 +1,31 @@
 //! Anthropic Messages API prompt caching (`cache_control` breakpoints)。
 //!
-//! 在请求上放置 **1 个** ephemeral 断点：最后一个 `tool`。该断点缓存其前的
-//! system + 全部 tools 稳定前缀，跨 turn 命中读缓存（百炼实测每轮 read≈7800
-//! tokens、creation=0）。
+//! 策略由 provider 能力决定（`PromptCachingPolicy`），调用方传入：
+//! - `Full`：system 末块 + 最后 tool + messages[-2] + messages[-1]，4 断点。
+//!   适用于 honor 所有断点的 provider（真 Anthropic 等）。
+//! - `LastBreakpointOnly`：仅最后 tool（稳定前缀 system+tools）。
+//!   适用于只认最后一个断点的 provider（百炼 /apps/anthropic 等）——
+//!   实测百炼在 messages[-1]（每轮变）上放断点会每轮重写、从不读（净负），
+//!   只放 tool 断点时每轮 read≈8000、creation=0。
+//! - `None`：不缓存。
 //!
-//! 为什么只放 tool 一个断点（不放 system / messages）：
-//! - **system 保持 `Text` 字符串**：实测百炼 `/apps/anthropic` 在完整请求体下以
-//!   `InvalidParameter` 拒绝 system-as-blocks；system 字符串 + tool 断点被接受，
-//!   且 tool 断点已隐式覆盖 system 前缀。
-//! - **不在 messages 上放断点**：实测百炼只认**最后一个** cache_control 断点。
-//!   若在 messages[-1]（当前消息，每轮变）上放断点，百炼每轮重写该前缀、从不读
-//!   （creation≈7905/turn、read=0，1.25x 写入成本、净负收益）。只放 tool 断点
-//!   （稳定）时，百炼每轮 read≈7808、creation=0。
-//! - real Anthropic 原生 API 会 honor 每个断点，messages 断点对长对话前缀缓存
-//!   有价值；但 cox 当前主力端是百炼，tool-only 是实测最优的通用默认。
+//! 默认策略由 `resolve_prompt_caching_policy` 按 `ModelProviderInfo` 决定：
+//! config 的 `prompt_caching` 显式优先；否则 `api.anthropic.com` → Full，
+//! 其余第三方 → LastBreakpointOnly（保守，第三方 anthropic 兼容端常有断点限制）。
+//! 这与 omp `supportsLongCacheRetention` 的"官方端给满配、第三方保守"哲学一致。
 
 use crate::anthropic::{
     AnthropicCacheControl, AnthropicContentBlockParam, AnthropicMessageContent,
-    AnthropicMessageParam, AnthropicMessagesRequest,
+    AnthropicMessageParam, AnthropicMessagesRequest, AnthropicSystemPrompt,
+    AnthropicTextBlockParam,
 };
 use serde_json::Value;
 
-/// Anthropic 每个请求最多 4 个 `cache_control` 断点（我们只用 1 个）。
+/// Anthropic 每个请求最多 4 个 `cache_control` 断点。
 const MAX_CACHE_BREAKPOINTS: usize = 4;
 
 /// short-lived ephemeral 断点：`{type:"ephemeral"}`（5min，无 `ttl`）。
-/// 百炼等第三方 anthropic 兼容端不支持 `ttl:"1h"`，统一用 short。
+/// 第三方端通常不支持 `ttl:"1h"`，统一 short；真 Anthropic 的 long TTL 留待后续。
 pub fn ephemeral_cache_control() -> AnthropicCacheControl {
     AnthropicCacheControl {
         cache_type: "ephemeral".into(),
@@ -33,28 +33,147 @@ pub fn ephemeral_cache_control() -> AnthropicCacheControl {
     }
 }
 
-/// 在请求上放置 cache_control 断点：仅最后一个 tool（稳定前缀 system+tools）。
-///
-/// system 不动（保持字符串；由 tool 断点隐式缓存其前缀）。messages 不动。无 tools
-/// 时不动请求（不缓存——cox 通常都带 tools）。
-pub fn apply_prompt_caching(request: &mut AnthropicMessagesRequest) {
-    let cc = ephemeral_cache_control();
+/// Prompt caching 策略，由 provider 能力决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptCachingPolicy {
+    /// 不缓存。
+    None,
+    /// 完整 4 断点：system 末块 + 最后 tool + messages[-2] + messages[-1]。
+    Full,
+    /// 仅最后 tool 断点（稳定前缀 system+tools）。
+    LastBreakpointOnly,
+}
 
-    // 最后一个 tool（Vec<Value>，在对象 Map 里塞 "cache_control" 键）。
-    // 该断点缓存其前的 system + 全部 tools 前缀。
-    if !request.tools.is_empty()
+impl PromptCachingPolicy {
+    /// 从 config 字符串解析（"none"/"full"/"last_breakpoint"）。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "none" => Some(Self::None),
+            "full" => Some(Self::Full),
+            "last_breakpoint" | "last-breakpoint" => Some(Self::LastBreakpointOnly),
+            _ => None,
+        }
+    }
+}
+
+/// 按 provider 能力解析策略：config `prompt_caching` 显式优先；否则按 base_url
+/// 默认——`api.anthropic.com` → Full（满配），其余 → LastBreakpointOnly（保守）。
+/// `base_url` 为 None 时按保守处理。
+pub fn resolve_prompt_caching_policy(
+    prompt_caching: Option<&str>,
+    base_url: Option<&str>,
+) -> PromptCachingPolicy {
+    if let Some(s) = prompt_caching
+        && let Some(p) = PromptCachingPolicy::parse(s)
+    {
+        return p;
+    }
+    match base_url
+        .and_then(|u| url::Url::parse(u).ok())
+        .and_then(|u| u.host_str().map(str::to_string))
+        .as_deref()
+    {
+        Some("api.anthropic.com") => PromptCachingPolicy::Full,
+        _ => PromptCachingPolicy::LastBreakpointOnly,
+    }
+}
+
+/// 在请求上按 policy 放置 cache_control 断点。调用方在构造完请求后、发送前调用。
+pub fn apply_prompt_caching(request: &mut AnthropicMessagesRequest, policy: PromptCachingPolicy) {
+    let cc = ephemeral_cache_control();
+    let mut used = 0usize;
+
+    // ① system 末块（仅 Full）：Text 升级为 Blocks，标缓存。
+    if policy == PromptCachingPolicy::Full
+        && used < MAX_CACHE_BREAKPOINTS
+        && let Some(system) = request.system.as_mut()
+    {
+        match system {
+            AnthropicSystemPrompt::Text(text) => {
+                *system = AnthropicSystemPrompt::Blocks(vec![AnthropicTextBlockParam {
+                    text: std::mem::take(text),
+                    cache_control: Some(cc.clone()),
+                }]);
+                used += 1;
+            }
+            AnthropicSystemPrompt::Blocks(blocks) => {
+                if let Some(last) = blocks.last_mut() {
+                    last.cache_control = Some(cc.clone());
+                    used += 1;
+                }
+            }
+        }
+    }
+
+    // ② 最后一个 tool（Full 和 LastBreakpointOnly 都标）。缓存其前的 system+tools 前缀。
+    if used < MAX_CACHE_BREAKPOINTS
+        && policy != PromptCachingPolicy::None
+        && !request.tools.is_empty()
         && let Some(Value::Object(map)) = request.tools.last_mut()
         && let Ok(cc_val) = serde_json::to_value(&cc)
     {
         map.insert("cache_control".to_string(), cc_val);
+        used += 1;
+    }
+
+    // ③④ messages[-2]、messages[-1] 末 text 块（仅 Full）。
+    if policy == PromptCachingPolicy::Full {
+        let len = request.messages.len();
+        let start = len.saturating_sub(2);
+        for i in start..len {
+            if used >= MAX_CACHE_BREAKPOINTS {
+                break;
+            }
+            if set_cache_on_message(&mut request.messages[i], cc.clone()) {
+                used += 1;
+            }
+        }
     }
 
     enforce_cache_control_limit(request, MAX_CACHE_BREAKPOINTS);
 }
 
-/// 数请求里所有 `Some(cache_control)`（tools + messages blocks；system 不标）。
+/// 给一个 message 的末 text 块标缓存。`Text(s)` content 升级为 `Blocks`；
+/// `Blocks` 委托 `set_cache_on_last_text_block`；无 text 块返回 false。
+fn set_cache_on_message(msg: &mut AnthropicMessageParam, cc: AnthropicCacheControl) -> bool {
+    match &mut msg.content {
+        AnthropicMessageContent::Text(text) => {
+            let text = std::mem::take(text);
+            msg.content = AnthropicMessageContent::Blocks(vec![AnthropicContentBlockParam::Text {
+                text,
+                cache_control: Some(cc),
+            }]);
+            true
+        }
+        AnthropicMessageContent::Blocks(blocks) => set_cache_on_last_text_block(blocks, cc),
+    }
+}
+
+/// 从尾往前找第一个 `Text`/`Image` 变体（有 `cache_control` 字段），置 `Some(cc)`。
+fn set_cache_on_last_text_block(
+    blocks: &mut [AnthropicContentBlockParam],
+    cc: AnthropicCacheControl,
+) -> bool {
+    for block in blocks.iter_mut().rev() {
+        match block {
+            AnthropicContentBlockParam::Text { cache_control, .. }
+            | AnthropicContentBlockParam::Image { cache_control, .. } => {
+                *cache_control = Some(cc);
+                return true;
+            }
+            AnthropicContentBlockParam::ToolUse { .. }
+            | AnthropicContentBlockParam::ToolResult { .. } => continue,
+        }
+    }
+    false
+}
+
+/// 数请求里所有 `Some(cache_control)`（system blocks + tools + messages blocks）。
 fn count_breakpoints(request: &AnthropicMessagesRequest) -> usize {
     let mut n = 0usize;
+    if let Some(AnthropicSystemPrompt::Blocks(blocks)) = request.system.as_ref() {
+        n += blocks.iter().filter(|b| b.cache_control.is_some()).count();
+    }
     n += request
         .tools
         .iter()
@@ -80,11 +199,16 @@ fn count_block_breakpoints(blocks: &[AnthropicContentBlockParam]) -> usize {
 }
 
 /// 超限时剥离断点（omp `enforceCacheControlLimit`）：先 messages 从前到后清，
-/// 再清 tools 非末个。正常路径（apply 后 = 1）为 no-op；仅当上游预置了断点时触发。
+/// 再清 system 非末块、tools 非末块。正常路径为 no-op。
 fn enforce_cache_control_limit(request: &mut AnthropicMessagesRequest, max: usize) {
     while count_breakpoints(request) > max {
         if let Some(i) = first_message_breakpoint_index(&request.messages) {
             clear_one_message_breakpoint(&mut request.messages[i]);
+            continue;
+        }
+        if let Some(AnthropicSystemPrompt::Blocks(blocks)) = request.system.as_mut()
+            && clear_non_last_block_breakpoint(blocks)
+        {
             continue;
         }
         if clear_non_last_tool_breakpoint(&mut request.tools) {
@@ -122,6 +246,17 @@ fn clear_one_message_breakpoint(msg: &mut AnthropicMessageParam) {
             _ => {}
         }
     }
+}
+
+fn clear_non_last_block_breakpoint(blocks: &mut [AnthropicTextBlockParam]) -> bool {
+    let last_idx = blocks.len().saturating_sub(1);
+    for (i, b) in blocks.iter_mut().enumerate() {
+        if i != last_idx && b.cache_control.is_some() {
+            b.cache_control = None;
+            return true;
+        }
+    }
+    false
 }
 
 fn clear_non_last_tool_breakpoint(tools: &mut [Value]) -> bool {
@@ -181,8 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn places_breakpoint_on_last_tool_only() {
-        // system 保持 Text 不动；messages 不动；只最后一个 tool 带 cc。
+    fn full_places_4_breakpoints() {
         let system = Some(AnthropicSystemPrompt::Text("sys".into()));
         let tools = vec![
             json!({"name":"a","input_schema":{}}),
@@ -190,32 +324,92 @@ mod tests {
         ];
         let messages = vec![user_text_msg("first"), user_text_msg("second")];
         let mut req = request_with(system, tools, messages);
-        apply_prompt_caching(&mut req);
+        apply_prompt_caching(&mut req, PromptCachingPolicy::Full);
 
         assert!(matches!(
             req.system.as_ref().unwrap(),
-            AnthropicSystemPrompt::Text(_)
+            AnthropicSystemPrompt::Blocks(_)
         ));
         assert!(matches!(req.tools.last(), Some(Value::Object(m)) if m.contains_key("cache_control")));
-        assert!(!matches!(req.tools.first(), Some(Value::Object(m)) if m.contains_key("cache_control")));
-        // messages 不动：Text 仍 Text（无 cc）。
+        for m in &req.messages {
+            match &m.content {
+                AnthropicMessageContent::Blocks(b) => assert!(block_has_cc(b)),
+                _ => panic!("content 应升级为 Blocks"),
+            }
+        }
+        assert_eq!(count_breakpoints(&req), 4);
+    }
+
+    #[test]
+    fn last_breakpoint_only_places_tool_only() {
+        let system = Some(AnthropicSystemPrompt::Text("sys".into()));
+        let tools = vec![json!({"name":"a","input_schema":{}}), json!({"name":"b","input_schema":{}})];
+        let messages = vec![user_text_msg("first"), user_text_msg("second")];
+        let mut req = request_with(system, tools, messages);
+        apply_prompt_caching(&mut req, PromptCachingPolicy::LastBreakpointOnly);
+
+        // system 仍 Text，messages 不动，只最后一个 tool 带 cc。
+        assert!(matches!(req.system.as_ref().unwrap(), AnthropicSystemPrompt::Text(_)));
         for m in &req.messages {
             assert!(matches!(m.content, AnthropicMessageContent::Text(_)));
         }
+        assert!(matches!(req.tools.last(), Some(Value::Object(m)) if m.contains_key("cache_control")));
+        assert!(!matches!(req.tools.first(), Some(Value::Object(m)) if m.contains_key("cache_control")));
         assert_eq!(count_breakpoints(&req), 1);
     }
 
     #[test]
-    fn no_tools_leaves_request_untouched() {
-        let messages = vec![user_text_msg("hi")];
-        let mut req = request_with(None, vec![], messages);
-        apply_prompt_caching(&mut req);
+    fn none_leaves_request_untouched() {
+        let mut req = request_with(
+            Some(AnthropicSystemPrompt::Text("sys".into())),
+            vec![json!({"name":"a","input_schema":{}})],
+            vec![user_text_msg("hi")],
+        );
+        apply_prompt_caching(&mut req, PromptCachingPolicy::None);
         assert_eq!(count_breakpoints(&req), 0);
     }
 
     #[test]
+    fn resolve_policy_config_overrides_base_url() {
+        // config 显式优先于 base_url 启发式。
+        assert_eq!(
+            resolve_prompt_caching_policy(Some("full"), Some("https://dashscope/v1")),
+            PromptCachingPolicy::Full
+        );
+        assert_eq!(
+            resolve_prompt_caching_policy(Some("none"), Some("https://api.anthropic.com")),
+            PromptCachingPolicy::None
+        );
+    }
+
+    #[test]
+    fn resolve_policy_default_by_base_url() {
+        // 无 config：api.anthropic.com → Full，其余 → LastBreakpointOnly。
+        assert_eq!(
+            resolve_prompt_caching_policy(None, Some("https://api.anthropic.com")),
+            PromptCachingPolicy::Full
+        );
+        assert_eq!(
+            resolve_prompt_caching_policy(None, Some("https://dashscope.aliyuncs.com/apps/anthropic")),
+            PromptCachingPolicy::LastBreakpointOnly
+        );
+        assert_eq!(
+            resolve_prompt_caching_policy(None, None),
+            PromptCachingPolicy::LastBreakpointOnly
+        );
+    }
+
+    #[test]
+    fn resolve_policy_unknown_config_falls_back_to_base_url() {
+        // config 值无法识别时回落到 base_url 启发式。
+        assert_eq!(
+            resolve_prompt_caching_policy(Some("garbage"), Some("https://api.anthropic.com")),
+            PromptCachingPolicy::Full
+        );
+    }
+
+    #[test]
     fn enforces_4_cap_when_upstream_pre_seeded() {
-        // 预置 5 条 message，每条末块都带 cc（共 5 个断点，超 4 上限）。
         let messages: Vec<AnthropicMessageParam> = (0..5)
             .map(|i| AnthropicMessageParam {
                 role: "user".into(),
@@ -226,7 +420,7 @@ mod tests {
             })
             .collect();
         let mut req = request_with(None, vec![], messages);
-        apply_prompt_caching(&mut req);
+        apply_prompt_caching(&mut req, PromptCachingPolicy::Full);
         assert!(count_breakpoints(&req) <= MAX_CACHE_BREAKPOINTS);
     }
 
@@ -235,17 +429,6 @@ mod tests {
         let cc = ephemeral_cache_control();
         assert_eq!(cc.cache_type, "ephemeral");
         assert!(cc.ttl.is_none());
-        let v = serde_json::to_value(&cc).unwrap();
-        assert_eq!(v, json!({"type":"ephemeral"}));
-    }
-
-    // 保留 block_has_cc 引用，避免未使用警告（enforce 路径间接用到计数逻辑）。
-    #[test]
-    fn block_has_cc_helper_smoke() {
-        let b = vec![AnthropicContentBlockParam::Text {
-            text: "x".into(),
-            cache_control: Some(ephemeral_cache_control()),
-        }];
-        assert!(block_has_cc(&b));
+        assert_eq!(serde_json::to_value(&cc).unwrap(), json!({"type":"ephemeral"}));
     }
 }

@@ -1700,9 +1700,15 @@ impl ModelClientSession {
                 thinking: None,
                 metadata: None,
             };
-            // 注入 prompt cache 断点（system 末块 + 最后一个 tool + messages[-2/-1]），
-            // 让 provider 缓存稳定前缀、跨 turn 复用 KV-cache。
-            codex_api::apply_prompt_caching(&mut request);
+            // 注入 prompt cache 断点。策略由 provider 能力决定：config 的
+            // prompt_caching 显式优先，否则按 base_url 默认（api.anthropic.com → Full，
+            // 其余第三方 → LastBreakpointOnly 保守）。
+            let provider_info = self.client.state.provider.info();
+            let cache_policy = codex_api::resolve_prompt_caching_policy(
+                provider_info.prompt_caching.as_deref(),
+                provider_info.base_url.as_deref(),
+            );
+            codex_api::apply_prompt_caching(&mut request, cache_policy);
 
             let request_session_telemetry = session_telemetry
                 .clone()

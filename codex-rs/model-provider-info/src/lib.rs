@@ -151,6 +151,13 @@ pub struct ModelProviderInfo {
     /// Whether this provider supports the Responses API WebSocket transport.
     #[serde(default)]
     pub supports_websockets: bool,
+    /// Prompt caching strategy for the Anthropic Messages wire API on this
+    /// provider: `"full"` (system+tools+messages breakpoints), `"last_breakpoint"`
+    /// (only the last stable breakpoint — for providers that only honor the last
+    /// cache_control), or `"none"`. Unset → resolved by base_url (api.anthropic.com
+    /// → full, else last_breakpoint).
+    #[serde(default)]
+    pub prompt_caching: Option<String>,
 }
 
 /// AWS SigV4 auth configuration for a model provider.
@@ -372,6 +379,7 @@ impl ModelProviderInfo {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: true,
             supports_websockets: true,
+            prompt_caching: None,
         }
     }
 
@@ -402,6 +410,7 @@ impl ModelProviderInfo {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: false,
+            prompt_caching: None,
         }
     }
 
@@ -556,6 +565,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        prompt_caching: None,
     }
 }
 

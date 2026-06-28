@@ -640,6 +640,7 @@ fn create_config_toml(
     codex_home: &Path,
     server_uri: &str,
     supports_websockets: bool,
+    prompt_caching: None,
 ) -> std::io::Result<()> {
     let config_toml = codex_home.join("config.toml");
     std::fs::write(

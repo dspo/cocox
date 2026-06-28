@@ -29,6 +29,8 @@ pub use crate::anthropic::AnthropicMessagesRequest;
 pub use crate::anthropic::AnthropicSystemPrompt;
 pub use crate::anthropic::AnthropicToolChoice;
 pub use crate::anthropic_cache::apply_prompt_caching;
+pub use crate::anthropic_cache::PromptCachingPolicy;
+pub use crate::anthropic_cache::resolve_prompt_caching_policy;
 pub use crate::anthropic_mapping::response_items_to_anthropic_messages;
 pub use crate::auth::AgentIdentityTelemetry;
 pub use crate::chat_completions::ChatCompletionsRequest;
