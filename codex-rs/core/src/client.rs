@@ -1670,9 +1670,18 @@ impl ModelClientSession {
                 .info()
                 .messages_endpoint_url();
 
-            let messages = response_items_to_anthropic_messages(&prompt.input);
-            let system = (!prompt.base_instructions.text.is_empty())
-                .then(|| AnthropicSystemPrompt::Text(prompt.base_instructions.text.clone()));
+            let (messages, extra_system_segments) =
+                response_items_to_anthropic_messages(&prompt.input);
+            // Base instructions + any `developer`/`system` role messages folded
+            // out of the messages array become the top-level `system` prompt.
+            // Anthropic Messages has no `developer`/`system` message role.
+            let mut system_parts: Vec<String> = Vec::new();
+            if !prompt.base_instructions.text.is_empty() {
+                system_parts.push(prompt.base_instructions.text.clone());
+            }
+            system_parts.extend(extra_system_segments);
+            let system = (!system_parts.is_empty())
+                .then(|| AnthropicSystemPrompt::Text(system_parts.join("\n\n")));
             let tools = create_tools_json_for_messages_api(&prompt.tools);
             let request = AnthropicMessagesRequest {
                 model: model_info.slug.clone(),

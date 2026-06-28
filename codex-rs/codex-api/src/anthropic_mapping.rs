@@ -22,16 +22,43 @@ use serde_json::Value;
 /// - `tool_result` must be wrapped in a `role: "user"` message.
 /// - `tool_use` blocks must appear in a `role: "assistant"` message.
 /// - Adjacent messages with the same role are merged where possible.
+/// - `system`/`developer` role messages are NOT valid in the Anthropic Messages
+///   `messages` array (only `user`/`assistant` are). Their text content is
+///   returned as extra system segments to be folded into the top-level
+///   `system` field by the caller; non-text blocks in such messages fall back
+///   to a `user` message so nothing is silently dropped.
+///
+/// Returns `(messages, extra_system_segments)`.
 pub fn response_items_to_anthropic_messages(
     items: &[ResponseItem],
-) -> Vec<AnthropicMessageParam> {
+) -> (Vec<AnthropicMessageParam>, Vec<String>) {
     let mut messages: Vec<AnthropicMessageParam> = Vec::new();
+    let mut system_segments: Vec<String> = Vec::new();
 
     for item in items {
         match item {
             ResponseItem::Message { role, content, .. } => {
                 let blocks = content_items_to_blocks(content);
                 if blocks.is_empty() {
+                    continue;
+                }
+                // Anthropic Messages only accepts `user`/`assistant` roles in
+                // the messages array. Codex emits `developer` (and legacy
+                // `system`) role messages for permissions/skills/env
+                // instructions; fold their text into the top-level `system`
+                // field instead of emitting an invalid role.
+                if matches!(role.as_str(), "system" | "developer") {
+                    if let Some(text) = blocks_to_text(&blocks) {
+                        system_segments.push(text);
+                        continue;
+                    }
+                    // Non-text system blocks (e.g. images): can't represent in
+                    // the system string, emit as a user message as a fallback.
+                    let new_msg = AnthropicMessageParam {
+                        role: "user".to_string(),
+                        content: AnthropicMessageContent::Blocks(blocks),
+                    };
+                    push_or_merge(&mut messages, new_msg);
                     continue;
                 }
                 let new_msg = AnthropicMessageParam {
@@ -111,7 +138,22 @@ pub fn response_items_to_anthropic_messages(
         }
     }
 
-    messages
+    (messages, system_segments)
+}
+
+/// If every block is a plain text block, returns their concatenated text;
+/// otherwise returns `None` (e.g. blocks contain images or tool use). Used to
+/// decide whether a `system`/`developer` role message can be folded into the
+/// top-level `system` string.
+fn blocks_to_text(blocks: &[AnthropicContentBlockParam]) -> Option<String> {
+    let mut text = String::new();
+    for block in blocks {
+        match block {
+            AnthropicContentBlockParam::Text { text: t, .. } => text.push_str(t),
+            _ => return None,
+        }
+    }
+    Some(text)
 }
 
 /// Converts Codex `ContentItem`s into Anthropic content blocks.
@@ -223,7 +265,7 @@ mod tests {
             internal_chat_message_metadata_passthrough: None,
         }];
 
-        let messages = response_items_to_anthropic_messages(&items);
+        let (messages, _system) = response_items_to_anthropic_messages(&items);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
         match &messages[0].content {
@@ -263,7 +305,7 @@ mod tests {
             },
         ];
 
-        let messages = response_items_to_anthropic_messages(&items);
+        let (messages, _system) = response_items_to_anthropic_messages(&items);
         assert_eq!(messages.len(), 1, "adjacent user messages should merge");
         assert_eq!(messages[0].role, "user");
         match &messages[0].content {
@@ -293,7 +335,7 @@ mod tests {
             },
         ];
 
-        let messages = response_items_to_anthropic_messages(&items);
+        let (messages, _system) = response_items_to_anthropic_messages(&items);
         assert_eq!(messages.len(), 2);
 
         // First message is the tool use (assistant)
@@ -335,5 +377,57 @@ mod tests {
             }
             _ => panic!("expected Blocks content"),
         }
+    }
+
+    #[test]
+    fn developer_role_folds_into_system_not_messages() {
+        // Anthropic Messages only accepts user/assistant roles in the messages
+        // array. `developer` (codex's permissions/skills instructions) must be
+        // folded into the top-level system segments, not emitted as a message.
+        let items = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "<permissions>do not leak sandbox perms</permissions>".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "system".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "extra system note".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "hi".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ];
+
+        let (messages, system_segments) = response_items_to_anthropic_messages(&items);
+
+        // No developer/system roles leak into the messages array.
+        assert!(
+            messages.iter().all(|m| m.role == "user" || m.role == "assistant"),
+            "no developer/system roles in messages: {:?}",
+            messages.iter().map(|m| &m.role).collect::<Vec<_>>()
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+
+        // Both developer/system texts folded into system segments, in order.
+        assert_eq!(system_segments.len(), 2);
+        assert!(system_segments[0].contains("<permissions>"));
+        assert_eq!(system_segments[1], "extra system note");
     }
 }
