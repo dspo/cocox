@@ -283,3 +283,72 @@ pub struct AnthropicMessageDelta {
     #[serde(default)]
     pub stop_sequence: Option<String>,
 }
+
+#[cfg(test)]
+mod serialize_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn request_with_system_tools_and_text_serializes() {
+        // 复现用户场景：system + 单条 user 文本 + 一个工具 + tool_choice Auto。
+        let request = AnthropicMessagesRequest {
+            model: "glm-5.1".to_string(),
+            messages: vec![AnthropicMessageParam {
+                role: "user".to_string(),
+                content: AnthropicMessageContent::Text("杭州未来一周天气如何？".to_string()),
+            }],
+            max_tokens: 8192,
+            system: Some(AnthropicSystemPrompt::Text(
+                "You are a helpful assistant.".to_string(),
+            )),
+            stream: true,
+            temperature: None,
+            tools: vec![json!({
+                "name": "get_weather",
+                "description": "Get weather",
+                "input_schema": { "type": "object", "properties": {} }
+            })],
+            tool_choice: Some(AnthropicToolChoice::Auto {
+                disable_parallel_tool_use: Some(false),
+            }),
+            thinking: None,
+            metadata: None,
+        };
+        let bytes = serde_json::to_vec(&request).expect("request should serialize");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json");
+        assert_eq!(v["model"], "glm-5.1");
+        assert_eq!(v["messages"][0]["role"], "user");
+        assert_eq!(v["messages"][0]["content"], "杭州未来一周天气如何？");
+        assert!(v["system"].is_string());
+        assert!(v["tools"][0]["input_schema"].is_object());
+    }
+
+    #[test]
+    fn request_with_blocks_content_serializes() {
+        let request = AnthropicMessagesRequest {
+            model: "glm-5.1".to_string(),
+            messages: vec![AnthropicMessageParam {
+                role: "user".to_string(),
+                content: AnthropicMessageContent::Blocks(vec![
+                    AnthropicContentBlockParam::Text {
+                        text: "hello".to_string(),
+                        cache_control: None,
+                    },
+                ]),
+            }],
+            max_tokens: 8192,
+            system: None,
+            stream: true,
+            temperature: None,
+            tools: Vec::new(),
+            tool_choice: None,
+            thinking: None,
+            metadata: None,
+        };
+        let bytes = serde_json::to_vec(&request).expect("blocks request should serialize");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json");
+        assert!(v["messages"][0]["content"].is_array());
+        assert_eq!(v["messages"][0]["content"][0]["type"], "text");
+    }
+}
