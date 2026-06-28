@@ -1683,7 +1683,7 @@ impl ModelClientSession {
             let system = (!system_parts.is_empty())
                 .then(|| AnthropicSystemPrompt::Text(system_parts.join("\n\n")));
             let tools = create_tools_json_for_messages_api(&prompt.tools);
-            let request = AnthropicMessagesRequest {
+            let mut request = AnthropicMessagesRequest {
                 model: model_info.slug.clone(),
                 messages,
                 max_tokens: model_info
@@ -1700,6 +1700,9 @@ impl ModelClientSession {
                 thinking: None,
                 metadata: None,
             };
+            // 注入 prompt cache 断点（system 末块 + 最后一个 tool + messages[-2/-1]），
+            // 让 provider 缓存稳定前缀、跨 turn 复用 KV-cache。
+            codex_api::apply_prompt_caching(&mut request);
 
             let request_session_telemetry = session_telemetry
                 .clone()

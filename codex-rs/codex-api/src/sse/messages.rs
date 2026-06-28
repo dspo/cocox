@@ -311,12 +311,25 @@ fn process_messages_event(
         AnthropicStreamEvent::MessageStop => {
             state.saw_non_ping = true;
             let response_id = state.response_id.take().unwrap_or_default();
-            let token_usage = state.usage.take().map(|u| TokenUsage {
-                input_tokens: u.input_tokens.unwrap_or(0),
-                cached_input_tokens: u.cache_read_input_tokens.unwrap_or(0),
-                output_tokens: u.output_tokens.unwrap_or(0),
-                reasoning_output_tokens: 0,
-                total_tokens: u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0),
+            let token_usage = state.usage.take().map(|u| {
+                // 便于实测时确认 prompt cache 命中（cache_read）与写入（cache_creation）。
+                if let (Some(read), Some(creation)) =
+                    (u.cache_read_input_tokens, u.cache_creation_input_tokens)
+                {
+                    if read > 0 || creation > 0 {
+                        trace!(
+                            "Anthropic Messages cache: read={read} creation={creation} input={}",
+                            u.input_tokens.unwrap_or(0)
+                        );
+                    }
+                }
+                TokenUsage {
+                    input_tokens: u.input_tokens.unwrap_or(0),
+                    cached_input_tokens: u.cache_read_input_tokens.unwrap_or(0),
+                    output_tokens: u.output_tokens.unwrap_or(0),
+                    reasoning_output_tokens: 0,
+                    total_tokens: u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0),
+                }
             });
 
             // Determine end_turn from stop_reason.

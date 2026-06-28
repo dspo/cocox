@@ -1,5 +1,6 @@
 pub(crate) mod api_bridge;
 pub(crate) mod anthropic;
+pub(crate) mod anthropic_cache;
 pub(crate) mod anthropic_mapping;
 pub(crate) mod auth;
 pub(crate) mod chat_completions;
@@ -27,6 +28,7 @@ pub use crate::anthropic::ANTHROPIC_API_VERSION;
 pub use crate::anthropic::AnthropicMessagesRequest;
 pub use crate::anthropic::AnthropicSystemPrompt;
 pub use crate::anthropic::AnthropicToolChoice;
+pub use crate::anthropic_cache::apply_prompt_caching;
 pub use crate::anthropic_mapping::response_items_to_anthropic_messages;
 pub use crate::auth::AgentIdentityTelemetry;
 pub use crate::chat_completions::ChatCompletionsRequest;
