@@ -159,6 +159,8 @@ fn model_provider_from_proto(
     let id = provider.id;
     let wire_api = match proto::WireApi::try_from(provider.wire_api) {
         Ok(proto::WireApi::Responses) => WireApi::Responses,
+        Ok(proto::WireApi::ChatCompletions) => WireApi::ChatCompletions,
+        Ok(proto::WireApi::AnthropicMessages) => WireApi::AnthropicMessages,
         Ok(proto::WireApi::Unspecified) => {
             return Err(parse_error("remote thread config omitted wire_api"));
         }
@@ -190,6 +192,7 @@ fn model_provider_from_proto(
         websocket_connect_timeout_ms: provider.websocket_connect_timeout_ms,
         requires_openai_auth: provider.requires_openai_auth,
         supports_websockets: provider.supports_websockets,
+        prompt_caching: None,
     };
     Ok((id, info))
 }
@@ -289,6 +292,8 @@ fn proto_string_map(values: HashMap<String, String>) -> proto::StringMap {
 fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
     match wire_api {
         WireApi::Responses => proto::WireApi::Responses,
+        WireApi::ChatCompletions => proto::WireApi::ChatCompletions,
+        WireApi::AnthropicMessages => proto::WireApi::AnthropicMessages,
     }
 }
 
@@ -427,6 +432,36 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    #[test]
+    fn model_provider_chat_completions_wire_api_roundtrips() {
+        let mut expected = expected_provider();
+        expected.wire_api = WireApi::ChatCompletions;
+        // Sanity-check the proto mapping before round-tripping.
+        assert_eq!(proto_wire_api(WireApi::ChatCompletions), proto::WireApi::ChatCompletions);
+
+        let proto = model_provider_to_proto("chat-completions", expected.clone());
+        let (id, actual) = model_provider_from_proto(proto).expect("model provider from proto");
+
+        assert_eq!(id, "chat-completions");
+        assert_eq!(actual.wire_api, WireApi::ChatCompletions);
+    }
+
+    #[test]
+    fn model_provider_anthropic_messages_wire_api_roundtrips() {
+        let mut expected = expected_provider();
+        expected.wire_api = WireApi::AnthropicMessages;
+        assert_eq!(
+            proto_wire_api(WireApi::AnthropicMessages),
+            proto::WireApi::AnthropicMessages
+        );
+
+        let proto = model_provider_to_proto("anthropic", expected.clone());
+        let (id, actual) = model_provider_from_proto(proto).expect("model provider from proto");
+
+        assert_eq!(id, "anthropic");
+        assert_eq!(actual.wire_api, WireApi::AnthropicMessages);
+    }
+
     fn proto_sources() -> Vec<proto::ThreadConfigSource> {
         let workspace_cwd = workspace_dir().to_string_lossy().into_owned();
         vec![
@@ -473,6 +508,7 @@ mod tests {
                             websocket_connect_timeout_ms: Some(10_000),
                             requires_openai_auth: false,
                             supports_websockets: true,
+                            prompt_caching: None,
                         }],
                         features: HashMap::from([
                             ("plugins".to_string(), false),
@@ -536,6 +572,7 @@ mod tests {
             websocket_connect_timeout_ms: Some(10_000),
             requires_openai_auth: false,
             supports_websockets: true,
+            prompt_caching: None,
             aws: None,
         }
     }

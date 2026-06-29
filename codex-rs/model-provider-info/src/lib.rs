@@ -55,12 +55,23 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// The Chat Completions API exposed by OpenAI-compatible providers at
+    /// `/v1/chat/completions`. Used for providers that do not implement the
+    /// Responses API (e.g. many OSS and third-party OpenAI-compatible servers).
+    ChatCompletions,
+    /// The Anthropic Messages API (`POST /v1/messages`). Serializes as
+    /// `"anthropic_messages"`; accepts `"anthropic"` and `"messages"` as
+    /// convenience aliases when deserializing.
+    #[serde(rename = "anthropic_messages")]
+    AnthropicMessages,
 }
 
 impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Responses => "responses",
+            Self::ChatCompletions => "chat_completions",
+            Self::AnthropicMessages => "anthropic_messages",
         };
         f.write_str(value)
     }
@@ -74,8 +85,13 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
+            "chat_completions" => Ok(Self::ChatCompletions),
+            "anthropic_messages" | "anthropic" | "messages" => Ok(Self::AnthropicMessages),
             "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses"])),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "chat_completions", "anthropic_messages"],
+            )),
         }
     }
 }
@@ -135,6 +151,13 @@ pub struct ModelProviderInfo {
     /// Whether this provider supports the Responses API WebSocket transport.
     #[serde(default)]
     pub supports_websockets: bool,
+    /// Prompt caching strategy for the Anthropic Messages wire API on this
+    /// provider: `"full"` (system+tools+messages breakpoints), `"last_breakpoint"`
+    /// (only the last stable breakpoint — for providers that only honor the last
+    /// cache_control), or `"none"`. Unset → resolved by base_url (api.anthropic.com
+    /// → full, else last_breakpoint).
+    #[serde(default)]
+    pub prompt_caching: Option<String>,
 }
 
 /// AWS SigV4 auth configuration for a model provider.
@@ -356,6 +379,7 @@ impl ModelProviderInfo {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: true,
             supports_websockets: true,
+            prompt_caching: None,
         }
     }
 
@@ -386,6 +410,7 @@ impl ModelProviderInfo {
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: false,
+            prompt_caching: None,
         }
     }
 
@@ -413,6 +438,19 @@ impl ModelProviderInfo {
 
     pub fn has_command_auth(&self) -> bool {
         self.auth.is_some()
+    }
+
+    /// Returns the full request URL for an Anthropic Messages API provider.
+    ///
+    /// Appends `/v1/messages` to `base_url`, falling back to
+    /// `https://api.anthropic.com` when `base_url` is absent. This is only
+    /// meaningful for `wire_api = "anthropic_messages"`.
+    pub fn messages_endpoint_url(&self) -> String {
+        let base = self
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.anthropic.com");
+        format!("{}/v1/messages", base.trim_end_matches('/'))
     }
 }
 
@@ -527,6 +565,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        prompt_caching: None,
     }
 }
 

@@ -49,6 +49,14 @@ use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
 use codex_api::ResponseCreateWsRequest;
 use codex_api::ResponsesApiRequest;
+use codex_api::ChatCompletionsClient as ApiChatCompletionsClient;
+use codex_api::ChatCompletionsOptions as ApiChatCompletionsOptions;
+use codex_api::AnthropicMessagesRequest;
+use codex_api::AnthropicSystemPrompt;
+use codex_api::AnthropicToolChoice;
+use codex_api::MessagesClient as ApiMessagesClient;
+use codex_api::MessagesOptions as ApiMessagesOptions;
+use codex_api::response_items_to_anthropic_messages;
 use codex_api::ResponsesClient as ApiResponsesClient;
 use codex_api::ResponsesOptions as ApiResponsesOptions;
 use codex_api::ResponsesWebsocketClient as ApiWebSocketResponsesClient;
@@ -61,6 +69,7 @@ use codex_api::WebsocketTelemetry;
 use codex_api::auth_header_telemetry;
 use codex_api::build_session_headers;
 use codex_api::create_text_param_for_request;
+use codex_api::map_to_chat_completions_request;
 use codex_api::response_create_client_metadata;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -84,6 +93,7 @@ use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
+use codex_tools::create_tools_json_for_messages_api;
 use codex_tools::create_tools_json_for_responses_api;
 use eventsource_stream::Event;
 use eventsource_stream::EventStreamError;
@@ -152,6 +162,11 @@ const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=20
 const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER: &str =
     "x-openai-internal-codex-responses-lite";
 const RESPONSES_ENDPOINT: &str = "/responses";
+const CHAT_COMPLETIONS_ENDPOINT: &str = "/chat/completions";
+const MESSAGES_ENDPOINT: &str = "/messages";
+/// Default `max_tokens` for the Anthropic Messages API, which requires an
+/// explicit cap on output length. TODO: make configurable per model.
+const DEFAULT_ANTHROPIC_MAX_TOKENS: i64 = 8192;
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
 // period between stream events.
@@ -1459,6 +1474,312 @@ impl ModelClientSession {
         }
     }
 
+    /// Streams a turn via the Chat Completions API (`POST /v1/chat/completions`).
+    ///
+    /// Builds the canonical internal [`ResponsesApiRequest`] (so request
+    /// construction stays wire-protocol agnostic), maps it to a
+    /// [`codex_api::ChatCompletionsRequest`], and drives it through
+    /// [`ApiChatCompletionsClient`]. Chat Completions has no WebSocket path
+    /// and no request compression, so this is a plain HTTP retry loop with
+    /// the same auth-recovery handling as [`stream_responses_api`].
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_chat_completions_api",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "chat_completions_http",
+            http.method = "POST",
+            api.path = "chat/completions",
+            turn.has_metadata_header = responses_metadata.has_turn_metadata()
+        )
+    )]
+    async fn stream_chat_completions_api(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                client_setup.agent_identity_telemetry.clone(),
+                pending_retry,
+            );
+            let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint(CHAT_COMPLETIONS_ENDPOINT),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+
+            let mut request = self.client.build_responses_request(
+                &client_setup.api_provider,
+                prompt,
+                model_info,
+                effort.clone(),
+                summary,
+                service_tier.clone(),
+                responses_metadata,
+            )?;
+            let store = request.store;
+            self.client
+                .prepare_response_items_for_request(&mut request.input, store);
+            let chat_request = map_to_chat_completions_request(&request);
+
+            let request_session_telemetry =
+                session_telemetry_for_request(session_telemetry, &request);
+            let inference_trace_attempt = inference_trace.start_attempt();
+
+            let mut extra_headers = ApiHeaderMap::new();
+            add_originator_header(&mut extra_headers, self.client.state.originator.as_str());
+            inference_trace_attempt.add_request_headers(&mut extra_headers);
+            inference_trace_attempt.record_started(&request);
+
+            let options = ApiChatCompletionsOptions {
+                extra_headers,
+                compression: Compression::None,
+                turn_state: Some(Arc::clone(&self.turn_state)),
+            };
+
+            let client = ApiChatCompletionsClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+            )
+            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let stream_result = client.stream_request(chat_request, options).await;
+
+            match stream_result {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        request_session_telemetry,
+                        inference_trace_attempt,
+                        Arc::clone(&self.client.state.provider),
+                    );
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    let response_debug_context =
+                        extract_response_debug_context(&unauthorized_transport);
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                            &self.client.state.provider,
+                        )
+                        .await?,
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let err = self.client.state.provider.map_api_error(err);
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    /// Streams a turn via the Anthropic Messages API (`POST /v1/messages`).
+    ///
+    /// Builds an [`AnthropicMessagesRequest`] directly from the prompt
+    /// (conversation history + tools + base instructions), authenticates with
+    /// `x-api-key` + `anthropic-version` (resolved by the model-provider auth
+    /// layer for `wire_api = "anthropic_messages"`), and drives it through
+    /// [`ApiMessagesClient`]. Like Chat Completions, there is no WebSocket
+    /// path and no request compression; the same auth-recovery loop as
+    /// [`stream_responses_api`] is reused.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_anthropic_messages_api",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "messages_http",
+            http.method = "POST",
+            api.path = "messages",
+        )
+    )]
+    async fn stream_anthropic_messages_api(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        service_tier: Option<String>,
+        effort: Option<ReasoningEffortConfig>,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let auth_manager = self.client.state.provider.auth_manager();
+        let mut auth_recovery = auth_manager
+            .as_ref()
+            .map(AuthManager::unauthorized_recovery);
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let client_setup = self.client.current_client_setup().await?;
+            let transport = ReqwestTransport::new(build_reqwest_client());
+            let request_auth_context = AuthRequestTelemetryContext::new(
+                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup.api_auth.as_ref(),
+                client_setup.agent_identity_telemetry.clone(),
+                pending_retry,
+            );
+            let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
+                session_telemetry,
+                request_auth_context,
+                RequestRouteTelemetry::for_endpoint(MESSAGES_ENDPOINT),
+                self.client.state.auth_env_telemetry.clone(),
+            );
+
+            let endpoint_url = self
+                .client
+                .state
+                .provider
+                .info()
+                .messages_endpoint_url();
+
+            let (messages, extra_system_segments) =
+                response_items_to_anthropic_messages(&prompt.input);
+            // Base instructions + any `developer`/`system` role messages folded
+            // out of the messages array become the top-level `system` prompt.
+            // Anthropic Messages has no `developer`/`system` message role.
+            let mut system_parts: Vec<String> = Vec::new();
+            if !prompt.base_instructions.text.is_empty() {
+                system_parts.push(prompt.base_instructions.text.clone());
+            }
+            system_parts.extend(extra_system_segments);
+            let system = (!system_parts.is_empty())
+                .then(|| AnthropicSystemPrompt::Text(system_parts.join("\n\n")));
+            let tools = create_tools_json_for_messages_api(&prompt.tools);
+            let mut request = AnthropicMessagesRequest {
+                model: model_info.slug.clone(),
+                messages,
+                max_tokens: model_info
+                    .context_window
+                    .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS)
+                    .min(DEFAULT_ANTHROPIC_MAX_TOKENS),
+                system,
+                stream: true,
+                temperature: None,
+                tools,
+                tool_choice: Some(AnthropicToolChoice::Auto {
+                    disable_parallel_tool_use: Some(!prompt.parallel_tool_calls),
+                }),
+                thinking: None,
+                metadata: None,
+            };
+            // 注入 prompt cache 断点。策略由 provider 能力决定：config 的
+            // prompt_caching 显式优先，否则按 base_url 默认（api.anthropic.com → Full，
+            // 其余第三方 → LastBreakpointOnly 保守）。
+            let provider_info = self.client.state.provider.info();
+            let cache_policy = codex_api::resolve_prompt_caching_policy(
+                provider_info.prompt_caching.as_deref(),
+                provider_info.base_url.as_deref(),
+            );
+            codex_api::apply_prompt_caching(&mut request, cache_policy);
+
+            let request_session_telemetry = session_telemetry
+                .clone()
+                .with_inference_request(service_tier.as_deref(), effort.as_ref());
+            let inference_trace_attempt = inference_trace.start_attempt();
+
+            let mut extra_headers = ApiHeaderMap::new();
+            add_originator_header(&mut extra_headers, self.client.state.originator.as_str());
+            inference_trace_attempt.add_request_headers(&mut extra_headers);
+            inference_trace_attempt.record_started(&request);
+
+            let options = ApiMessagesOptions {
+                extra_headers,
+                turn_state: Some(Arc::clone(&self.turn_state)),
+            };
+
+            let client = ApiMessagesClient::new(
+                transport,
+                client_setup.api_provider,
+                client_setup.api_auth,
+                endpoint_url,
+            )
+            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let stream_result = client.stream_request(request, options).await;
+
+            match stream_result {
+                Ok(stream) => {
+                    let (stream, _) = map_response_stream(
+                        stream,
+                        request_session_telemetry,
+                        inference_trace_attempt,
+                        Arc::clone(&self.client.state.provider),
+                    );
+                    return Ok(stream);
+                }
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    let response_debug_context =
+                        extract_response_debug_context(&unauthorized_transport);
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                            &self.client.state.provider,
+                        )
+                        .await?,
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let err = self.client.state.provider.map_api_error(err);
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    return Err(err);
+                }
+            }
+        }
+    }
+
     /// Streams a turn via the Responses API over WebSocket transport.
     #[allow(clippy::too_many_arguments)]
     #[instrument(
@@ -1771,6 +2092,30 @@ impl ModelClientSession {
                     summary,
                     service_tier,
                     responses_metadata,
+                    inference_trace,
+                )
+                .await
+            }
+            WireApi::ChatCompletions => {
+                self.stream_chat_completions_api(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    effort,
+                    summary,
+                    service_tier,
+                    responses_metadata,
+                    inference_trace,
+                )
+                .await
+            }
+            WireApi::AnthropicMessages => {
+                self.stream_anthropic_messages_api(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    service_tier,
+                    effort,
                     inference_trace,
                 )
                 .await

@@ -1,6 +1,8 @@
+pub(crate) mod chat_completions;
 pub(crate) mod compact;
 pub(crate) mod images;
 pub(crate) mod memories;
+pub(crate) mod messages;
 pub(crate) mod models;
 pub(crate) mod realtime_call;
 pub(crate) mod realtime_websocket;
@@ -10,6 +12,10 @@ pub(crate) mod search;
 mod session;
 
 pub use compact::CompactClient;
+pub use chat_completions::ChatCompletionsClient;
+pub use chat_completions::ChatCompletionsOptions;
+pub use messages::MessagesClient;
+pub use messages::MessagesOptions;
 pub use images::ImagesClient;
 pub use memories::MemoriesClient;
 pub use models::ModelsClient;
