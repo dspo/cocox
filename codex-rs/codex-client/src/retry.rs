@@ -57,9 +57,7 @@ pub fn backoff(base: Duration, attempt: u64) -> Duration {
 /// form is intentionally unsupported.
 fn retry_after_delay(err: &TransportError) -> Option<Duration> {
     let TransportError::Http {
-        status,
-        headers,
-        ..
+        status, headers, ..
     } = err
     else {
         return None;
@@ -216,8 +214,8 @@ mod tests {
 
     #[tokio::test]
     async fn retries_429_then_succeeds() {
-        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
 
         let attempts = Arc::new(AtomicU64::new(0));
         let attempts_inner = Arc::clone(&attempts);
@@ -230,10 +228,8 @@ mod tests {
                 retry_transport: false,
             },
         };
-        let result: Result<u64, TransportError> = run_with_retry(
-            policy,
-            req,
-            |_: Request, _: u64| {
+        let result: Result<u64, TransportError> =
+            run_with_retry(policy, req, |_: Request, _: u64| {
                 let attempts_inner = Arc::clone(&attempts_inner);
                 async move {
                     let n = attempts_inner.fetch_add(1, Ordering::SeqCst);
@@ -243,9 +239,8 @@ mod tests {
                         Ok(42u64)
                     }
                 }
-            },
-        )
-        .await;
+            })
+            .await;
 
         let value = result.unwrap();
         assert_eq!(value, 42);
@@ -254,8 +249,8 @@ mod tests {
 
     #[tokio::test]
     async fn does_not_retry_429_when_disabled() {
-        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
 
         let attempts = Arc::new(AtomicU64::new(0));
         let attempts_inner = Arc::clone(&attempts);
@@ -268,18 +263,15 @@ mod tests {
                 retry_transport: false,
             },
         };
-        let result: Result<u64, TransportError> = run_with_retry(
-            policy,
-            req,
-            |_: Request, _: u64| {
+        let result: Result<u64, TransportError> =
+            run_with_retry(policy, req, |_: Request, _: u64| {
                 let attempts_inner = Arc::clone(&attempts_inner);
                 async move {
                     attempts_inner.fetch_add(1, Ordering::SeqCst);
                     Err(http_429(Some("0")))
                 }
-            },
-        )
-        .await;
+            })
+            .await;
 
         assert!(matches!(
             result,
