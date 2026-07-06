@@ -281,7 +281,13 @@ impl ModelProviderInfo {
         let retry = ApiRetryConfig {
             max_attempts: self.request_max_retries(),
             base_delay: Duration::from_millis(200),
-            retry_429: false,
+            // Anthropic-compatible providers (e.g. third-party GLM/Zhipu
+            // endpoints) return 429 on transient rate-limiting and expect the
+            // client to honor `Retry-After`. OpenAI's 429 typically denotes a
+            // usage/quota limit (already mapped to `UsageLimitReached` at the
+            // api-bridge layer), so retrying there stays disabled to preserve
+            // prior behavior.
+            retry_429: matches!(self.wire_api, WireApi::AnthropicMessages),
             retry_5xx: true,
             retry_transport: true,
         };

@@ -196,6 +196,39 @@ fn test_personal_access_token_uses_chatgpt_codex_base_url() {
 }
 
 #[test]
+fn test_retry_429_enabled_only_for_anthropic_messages_wire_api() {
+    let anthropic: ModelProviderInfo = toml::from_str(
+        r#"
+name = "Anthropic"
+base_url = "https://api.anthropic.com/v1"
+wire_api = "anthropic_messages"
+"#,
+    )
+    .unwrap();
+    assert!(anthropic.to_api_provider(None).unwrap().retry.retry_429);
+
+    let openai: ModelProviderInfo = toml::from_str(
+        r#"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+wire_api = "responses"
+"#,
+    )
+    .unwrap();
+    assert!(!openai.to_api_provider(None).unwrap().retry.retry_429);
+
+    let chat: ModelProviderInfo = toml::from_str(
+        r#"
+name = "Chat"
+base_url = "https://example.com/v1"
+wire_api = "chat_completions"
+"#,
+    )
+    .unwrap();
+    assert!(!chat.to_api_provider(None).unwrap().retry.retry_429);
+}
+
+#[test]
 fn test_supports_remote_compaction_for_azure_name() {
     let provider = ModelProviderInfo {
         name: "Azure".into(),
